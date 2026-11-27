@@ -16,6 +16,7 @@ import re
 import shutil
 import socket
 import sqlite3
+import sys
 from collections import defaultdict
 from contextlib import closing
 from datetime import date, datetime, timedelta, timezone
@@ -54,10 +55,13 @@ load_env(Path(__file__).with_name(".env"))
 TOKEN = os.getenv("BOT_TOKEN")
 # Если задать OWNER_ID, бот будет отвечать только тебе (иначе любой, кто найдёт бота,
 # сможет менять твой склад). Свой id можно узнать у бота @userinfobot.
-_owner = (os.getenv("OWNER_ID") or "0").strip()
-if not _owner.isdigit():
-    raise SystemExit("OWNER_ID в файле .env должен состоять только из цифр, например 123456789.")
-OWNER_ID = int(_owner)
+# Несколько человек с общей базой: id через запятую, например 111111111,222222222.
+# Первый в списке — владелец: ему приходят ежедневные копии, только он может /restore.
+_owners = [x for x in re.split(r"[,;\s]+", os.getenv("OWNER_ID") or "") if x]
+if not all(x.isdigit() for x in _owners):
+    raise SystemExit("OWNER_ID: только цифры, несколько id — через запятую, например 111111111,222222222.")
+ALLOWED_IDS = [int(x) for x in _owners]
+OWNER_ID = ALLOWED_IDS[0] if ALLOWED_IDS else 0
 
 # База данных лежит рядом с main.py. На сервере (Railway) задай DATA_DIR=/data —
 # папку постоянного диска (Volume), иначе база пропадёт при каждом обновлении.
@@ -67,7 +71,7 @@ DB_PATH = DATA_DIR / "warehouse.db"
 # Автобэкап: раз в день бот присылает владельцу файл базы в это время (по TZ_HOURS)
 BACKUP_HOUR = 23
 
-VERSION = "0.7"
+VERSION = "0.7.1"
 
 # Часовой пояс для дат продаж и статистики: сдвиг от UTC в часах.
 # Тбилиси = 4. Нужен, чтобы на сервере (где часы обычно по UTC) даты не уезжали.
@@ -1814,9 +1818,9 @@ class OneAtATime(BaseMiddleware):
 dp = Dispatcher()
 dp.update.outer_middleware(OneAtATime())
 
-if OWNER_ID:
-    dp.message.filter(F.from_user.id == OWNER_ID)
-    dp.callback_query.filter(F.from_user.id == OWNER_ID)
+if ALLOWED_IDS:
+    dp.message.filter(F.from_user.id.in_(ALLOWED_IDS))
+    dp.callback_query.filter(F.from_user.id.in_(ALLOWED_IDS))
 
 
 # --- навигация -------------------------------------------------------------
@@ -3047,7 +3051,7 @@ async def send_backup(bot, chat_id, caption):
 BACKUP_TEXT = (
     "💾 <b>Резервная копия</b>\n\n"
     "Вся база (детали, сборки, история, настройки) — один файл.\n"
-    f"Бот сам присылает его каждый день в {BACKUP_HOUR}:00, если задан OWNER_ID.\n\n"
+    f"Бот сам присылает его владельцу каждый день в {BACKUP_HOUR}:00.\n\n"
     "<b>Восстановить:</b> пришли сюда файл <code>.db</code> из копии, а в подписи к файлу "
     "напиши <code>/restore</code>. Текущая база перед заменой сохранится рядом."
 )
@@ -3075,8 +3079,8 @@ async def cmd_backup(message: Message, bot: Bot):
 @dp.message(F.document, F.caption, F.caption.startswith("/restore"))
 async def on_restore(message: Message, state: FSMContext, bot: Bot):
     await state.clear()
-    if not OWNER_ID:
-        await message.answer("Восстановление работает только при заданном OWNER_ID.")
+    if not OWNER_ID or message.from_user.id != OWNER_ID:
+        await message.answer("Восстановить базу может только владелец бота (первый id в OWNER_ID).")
         return
     if message.document.file_size and message.document.file_size > 50 * 1024 * 1024:
         await message.answer("Файл слишком большой для базы склада.")
@@ -3143,7 +3147,11 @@ def ensure_single_instance():
 async def main():
     if not TOKEN:
         raise SystemExit("Не задан BOT_TOKEN. Открой файл .env рядом с main.py и впиши токен после BOT_TOKEN=")
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    # Логи в обычный вывод: Railway красит всё из потока ошибок в красный, даже INFO
+    logging.basicConfig(level=logging.INFO, stream=sys.stdout,
+                        format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    if len(ALLOWED_IDS) > 1:
+        print(f"Доступ: {len(ALLOWED_IDS)} человек, владелец — первый id в OWNER_ID")
     lock = ensure_single_instance()  # переменную не удалять: порт держится, пока она жива
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     init_db()
