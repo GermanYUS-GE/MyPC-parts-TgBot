@@ -7,6 +7,13 @@
 .env
 *.env
 
+# Личные рабочие заметки (остаются только на компьютере)
+CLAUDE.md
+docs/PROJECT_CONTEXT.md
+docs/CHAT_HISTORY.md
+docs/PLAN_*.md
+gitignore
+
 # Служебные файлы Python
 __pycache__/
 *.pyc
